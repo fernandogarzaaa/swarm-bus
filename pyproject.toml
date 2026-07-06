@@ -1,0 +1,44 @@
+[project]
+name = "swarm-bus"
+version = "0.1.0"
+description = "Production-grade event-driven multi-agent message broker and coordination fabric."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "MIT" }
+authors = [
+    { name = "SwarmBus Maintainers" }
+]
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "redis[hiredis]>=5.0",
+    "pydantic-settings",
+    "pydantic>=2.0"
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "mypy"
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ANN"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
