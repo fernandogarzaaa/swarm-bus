@@ -31,6 +31,10 @@ locker = DistributedAgentLocker()
 interceptor = DeadlockLoopInterceptor()
 
 
+class HealthResponse(BaseModel):
+    status: str
+
+
 class BroadcastRequest(BaseModel):
     task: str = Field(min_length=1)
     history: list[dict[str, Any]] = Field(default_factory=list)
@@ -54,6 +58,22 @@ class ClaimResponse(BaseModel):
     agent_id: str
     lease_acquired: bool
     lock_ttl_ms: int
+
+
+@app.get("/healthz", response_model=HealthResponse)
+async def health_check() -> HealthResponse:
+    """Liveness check: confirms the app is up and that Redis is reachable."""
+
+    try:
+        await broker.redis.ping()
+    except RedisError as exc:
+        logger.warning("Health check Redis ping failed", extra={"error": str(exc)})
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"status": "degraded", "reason": "redis unreachable"},
+        ) from exc
+
+    return HealthResponse(status="ok")
 
 
 @app.post("/v1/bus/broadcast", response_model=BroadcastResponse)

@@ -9,6 +9,7 @@ from typing import Any
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError, ResponseError
+from redis.typing import StreamEntry
 
 from app.config import settings
 
@@ -45,8 +46,8 @@ class StreamBroker:
     @classmethod
     def _decode_event(
         cls,
-        stream_id: RedisScalar,
-        fields: Mapping[RedisScalar, RedisScalar],
+        stream_id: bytes | str,
+        fields: Mapping[bytes | str, bytes | str],
         topic: str,
     ) -> dict[str, Any]:
         raw_payload = fields.get(b"payload")
@@ -168,9 +169,26 @@ class StreamBroker:
                 read_pending = False
                 continue
 
+            if not isinstance(packets, list):
+                # xreadgroup on a non-cluster client always returns the
+                # list-of-[stream, entries] form; the dict variants in the
+                # stub's return type only apply to cluster multi-node routing.
+                logger.error(
+                    "Unexpected Redis xreadgroup response shape",
+                    extra={"topic": topic, "response_type": type(packets).__name__},
+                )
+                raise TypeError("unexpected xreadgroup response shape")
+
             delivered_any = False
             for _stream_name, entries in packets:
-                for stream_id, fields in entries:
+                stream_entries: list[StreamEntry] = entries
+                for stream_id, fields in stream_entries:
+                    if stream_id is None or fields is None:
+                        logger.error(
+                            "Redis stream entry is missing id or field data",
+                            extra={"topic": topic},
+                        )
+                        raise ValueError("stream entry missing id or field data")
                     delivered_any = True
                     decoded_stream_id = self._decode(stream_id)
                     event = self._decode_event(stream_id, fields, topic)
