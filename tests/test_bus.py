@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
+from redis.exceptions import RedisError
 
+from app import main as main_module
 from app.detector import DeadlockLoopInterceptor
 from app.locker import DistributedAgentLocker
 
@@ -33,3 +36,30 @@ def test_loop_interception_blocks_cyclic_communication_history() -> None:
     ]
 
     assert interceptor.validate_trajectory(cyclic_history) is False
+
+
+@pytest.mark.asyncio
+async def test_health_check_reports_ok_when_redis_is_reachable() -> None:
+    redis_mock = AsyncMock()
+    redis_mock.ping.return_value = True
+
+    with patch.object(main_module.broker, "redis", redis_mock):
+        response = await main_module.health_check()
+
+    assert response.status == "ok"
+    redis_mock.ping.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_health_check_returns_503_when_redis_is_unreachable() -> None:
+    redis_mock = AsyncMock()
+    redis_mock.ping.side_effect = RedisError("connection refused")
+
+    with patch.object(main_module.broker, "redis", redis_mock):
+        with pytest.raises(HTTPException) as exc_info:
+            await main_module.health_check()
+
+    detail = exc_info.value.detail
+    assert isinstance(detail, dict)
+    assert exc_info.value.status_code == 503
+    assert detail["status"] == "degraded"
