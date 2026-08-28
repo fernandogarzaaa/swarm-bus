@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable
-from typing import Any, cast
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -83,8 +81,7 @@ class DistributedAgentLocker:
         lock_key = self._lock_key(task_id)
         owner_token = self._owner_token(agent_id)
         try:
-            release_result = self.redis.eval(self._RELEASE_SCRIPT, 1, lock_key, owner_token)
-            released = await cast(Awaitable[Any], release_result)
+            released = await self.redis.eval(self._RELEASE_SCRIPT, 1, lock_key, owner_token)
             lease_released = int(released) == 1
             logger.info(
                 "Task lock release attempted",
