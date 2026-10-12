@@ -9,7 +9,7 @@ from typing import Any
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError, ResponseError
-from redis.typing import StreamEntry
+from redis.typing import EncodableT, FieldT, StreamEntry
 
 from app.config import settings
 
@@ -127,6 +127,40 @@ class StreamBroker:
             )
             raise
 
+    @staticmethod
+    def dead_letter_key(topic: str) -> str:
+        """Redis stream that receives malformed entries for ``topic``."""
+
+        return f"swarmbus:dlq:{topic.strip()}"
+
+    async def _dead_letter(
+        self,
+        stream_key: str,
+        consumer_group: str,
+        topic: str,
+        stream_id: bytes | str,
+        fields: Mapping[bytes | str, bytes | str] | None,
+        reason: str,
+    ) -> None:
+        """Copy a malformed entry to the dead-letter stream, then ack the original."""
+
+        decoded_stream_id = self._decode(stream_id)
+        raw_fields: dict[str, str] = {}
+        for key, value in (fields or {}).items():
+            raw_fields[self._decode(key)] = self._decode(value)
+        dlq_record: dict[FieldT, EncodableT] = {
+            "source_stream_id": decoded_stream_id,
+            "consumer_group": consumer_group,
+            "reason": reason,
+            "raw_fields": json.dumps(raw_fields, sort_keys=True, default=str),
+        }
+        logger.error(
+            "Dead-lettering malformed Redis stream entry",
+            extra={"topic": topic, "stream_id": decoded_stream_id, "reason": reason},
+        )
+        await self.redis.xadd(self.dead_letter_key(topic), dlq_record)
+        await self.redis.xack(stream_key, consumer_group, stream_id)
+
     async def subscribe_topic(
         self,
         topic: str,
@@ -183,15 +217,26 @@ class StreamBroker:
             for _stream_name, entries in packets:
                 stream_entries: list[StreamEntry] = entries
                 for stream_id, fields in stream_entries:
-                    if stream_id is None or fields is None:
+                    if stream_id is None:
                         logger.error(
-                            "Redis stream entry is missing id or field data",
+                            "Redis stream entry is missing its id; skipping",
                             extra={"topic": topic},
                         )
-                        raise ValueError("stream entry missing id or field data")
+                        continue
                     delivered_any = True
                     decoded_stream_id = self._decode(stream_id)
-                    event = self._decode_event(stream_id, fields, topic)
+                    try:
+                        if fields is None:
+                            # Entry was trimmed/deleted while pending in the PEL.
+                            raise ValueError("stream entry missing field data")
+                        event = self._decode_event(stream_id, fields, topic)
+                    except ValueError as exc:
+                        # Poison message: ack it and move it to the dead-letter
+                        # stream so a restart does not crash-loop on it forever.
+                        await self._dead_letter(
+                            stream_key, consumer_group, topic, stream_id, fields, str(exc)
+                        )
+                        continue
                     try:
                         yield event
                     except GeneratorExit:

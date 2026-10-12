@@ -32,6 +32,10 @@ class DeadlockLoopInterceptor:
 
         if not isinstance(execution_history, list):
             raise TypeError("execution_history must be a list of handoff dictionaries")
+        if len(execution_history) > settings.MAX_HISTORY_LENGTH:
+            raise ValueError(
+                f"execution_history exceeds MAX_HISTORY_LENGTH ({settings.MAX_HISTORY_LENGTH})"
+            )
         if len(execution_history) < 2:
             return True
 
@@ -47,28 +51,43 @@ class DeadlockLoopInterceptor:
             node_fingerprints[source_agent].append(fingerprint)
             node_fingerprints[target_agent].append(fingerprint)
 
-        cycle_path = self._find_cycle(adjacency)
-        if not cycle_path:
+        cycles = self._find_cycles(adjacency)
+        if not cycles:
             return True
 
-        has_progression = self._cycle_has_progression(cycle_path, node_fingerprints)
-        if has_progression and len(cycle_path) <= settings.MAX_LOOP_DEPTH:
-            logger.warning(
-                "Cyclic handoff observed with payload progression inside configured loop depth",
-                extra={"cycle_path": cycle_path, "max_loop_depth": settings.MAX_LOOP_DEPTH},
-            )
-            return True
+        for cycle_path in cycles:
+            if not self._cycle_is_tolerated(cycle_path, node_fingerprints):
+                logger.critical(
+                    "SwarmBus circuit breaker intercepted non-progressing agent communication loop",
+                    extra={
+                        "cycle_path": cycle_path,
+                        "max_loop_depth": settings.MAX_LOOP_DEPTH,
+                        "execution_history_length": len(execution_history),
+                    },
+                )
+                return False
 
-        logger.critical(
-            "SwarmBus circuit breaker intercepted non-progressing agent communication loop",
-            extra={
-                "cycle_path": cycle_path,
-                "max_loop_depth": settings.MAX_LOOP_DEPTH,
-                "execution_history_length": len(execution_history),
-                "has_progression": has_progression,
-            },
+        logger.warning(
+            "Cyclic handoff observed with payload progression inside configured loop depth",
+            extra={"cycles": cycles, "max_loop_depth": settings.MAX_LOOP_DEPTH},
         )
-        return False
+        return True
+
+    @classmethod
+    def _cycle_is_tolerated(
+        cls,
+        cycle_path: list[str],
+        node_fingerprints: dict[str, list[str]],
+    ) -> bool:
+        """A cycle is tolerated only if it progresses and spans <= MAX_LOOP_DEPTH agents.
+
+        ``cycle_path`` is closed (its first node is repeated at the end), so the
+        number of distinct agents in the cycle is ``len(cycle_path) - 1``.
+        """
+
+        cycle_agents = len(cycle_path) - 1
+        has_progression = cls._cycle_has_progression(cycle_path, node_fingerprints)
+        return has_progression and cycle_agents <= settings.MAX_LOOP_DEPTH
 
     @staticmethod
     def _extract_agent(handoff: dict[str, Any], key: str, index: int) -> str:
@@ -111,37 +130,41 @@ class DeadlockLoopInterceptor:
         for node in cycle_path:
             observed_fingerprints.update(node_fingerprints.get(node, []))
         return (
-            len(observed_fingerprints) > 1
-            and "no-progression-state" not in observed_fingerprints
+            len(observed_fingerprints) > 1 and "no-progression-state" not in observed_fingerprints
         )
 
     @staticmethod
-    def _find_cycle(adjacency: dict[str, set[str]]) -> list[str]:
+    def _find_cycles(adjacency: dict[str, set[str]]) -> list[list[str]]:
+        """Return one closed cycle path per DFS back edge, e.g. ``["A", "B", "A"]``.
+
+        Iterative DFS, so arbitrarily long acyclic histories cannot raise
+        ``RecursionError``. Neighbours are visited in sorted order for determinism.
+        """
+
         visiting: set[str] = set()
         visited: set[str] = set()
-        stack: list[str] = []
+        cycles: list[list[str]] = []
 
-        def dfs(node: str) -> list[str] | None:
-            visiting.add(node)
-            stack.append(node)
-
-            for neighbor in adjacency.get(node, set()):
+        for root in sorted(adjacency):
+            if root in visited:
+                continue
+            path: list[str] = [root]
+            visiting.add(root)
+            frames: list[tuple[str, list[str]]] = [(root, sorted(adjacency.get(root, set())))]
+            while frames:
+                node, pending = frames[-1]
+                if not pending:
+                    frames.pop()
+                    path.pop()
+                    visiting.discard(node)
+                    visited.add(node)
+                    continue
+                neighbor = pending.pop(0)
                 if neighbor in visiting:
-                    cycle_start = stack.index(neighbor)
-                    return [*stack[cycle_start:], neighbor]
-                if neighbor not in visited:
-                    cycle = dfs(neighbor)
-                    if cycle:
-                        return cycle
-
-            visiting.remove(node)
-            visited.add(node)
-            stack.pop()
-            return None
-
-        for node in adjacency:
-            if node not in visited:
-                cycle = dfs(node)
-                if cycle:
-                    return cycle
-        return []
+                    cycle_start = path.index(neighbor)
+                    cycles.append([*path[cycle_start:], neighbor])
+                elif neighbor not in visited:
+                    visiting.add(neighbor)
+                    path.append(neighbor)
+                    frames.append((neighbor, sorted(adjacency.get(neighbor, set()))))
+        return cycles

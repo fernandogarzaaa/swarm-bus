@@ -46,6 +46,14 @@ SwarmBus reads configuration from environment variables through Pydantic Setting
 | `MAX_LOOP_DEPTH` | `4` | Maximum tolerated progressing cycle depth |
 | `LOCK_TTL_MS` | `10000` | Redis task lease TTL in milliseconds |
 | `AGENT_BUS_ENV` | `production` | Environment label included in brokered events |
+| `MAX_HISTORY_LENGTH` | `256` | Maximum handoff entries accepted in a broadcast `history` (longer requests get HTTP `422`) |
+| `SWARMBUS_API_KEY` | unset | When set, `/v1/bus/*` requires `X-API-Key: <key>` or `Authorization: Bearer <key>` (`/healthz` stays public). When unset, the bus routes are unauthenticated and a warning is logged at startup |
+
+`MAX_LOOP_DEPTH` counts distinct agents in a cycle: with the default `4`, a progressing `A -> B -> C -> D -> A` loop is allowed and a 5-agent loop is rejected. Every cycle in the history is checked, not just the first one found.
+
+### Malformed stream entries
+
+If a consumer reads a stream entry that has no `payload` field, invalid JSON, or a non-object payload, SwarmBus acknowledges it and copies it to the dead-letter stream `swarmbus:dlq:<topic>` (fields `source_stream_id`, `consumer_group`, `reason`, `raw_fields`) instead of raising. This stops a single bad entry from crash-looping consumers on restart.
 
 ## Install
 
@@ -60,8 +68,10 @@ If you are not using `uv`, install the runtime and development dependencies from
 Start Redis, then run the FastAPI application:
 
 ```bash
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
+
+Only bind to `0.0.0.0` (or another non-loopback address) with `SWARMBUS_API_KEY` set; without it, anyone who can reach the port can claim task leases and inject events.
 
 ## API
 
