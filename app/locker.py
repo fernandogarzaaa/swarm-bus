@@ -22,6 +22,13 @@ class DistributedAgentLocker:
     return 0
     """
 
+    _RENEW_SCRIPT = """
+    if redis.call("GET", KEYS[1]) == ARGV[1] then
+        return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+    end
+    return 0
+    """
+
     def __init__(self, redis_client: Redis | None = None) -> None:
         self.redis: Redis = redis_client or Redis.from_url(
             settings.REDIS_URL,
@@ -95,6 +102,28 @@ class DistributedAgentLocker:
         except RedisError:
             logger.exception(
                 "Redis task lock release failed",
+                extra={"task_id": task_id, "agent_id": agent_id},
+            )
+            raise
+
+    async def renew_task_lock(self, task_id: str, agent_id: str) -> bool:
+        """Extend a held lease by LOCK_TTL_MS; returns False if the agent no longer owns it."""
+
+        lock_key = self._lock_key(task_id)
+        owner_token = self._owner_token(agent_id)
+        try:
+            renewed = await self.redis.eval(
+                self._RENEW_SCRIPT, 1, lock_key, owner_token, str(settings.LOCK_TTL_MS)
+            )
+            lease_renewed = int(renewed) == 1
+            logger.info(
+                "Task lock renewal attempted",
+                extra={"task_id": task_id, "agent_id": agent_id, "lease_renewed": lease_renewed},
+            )
+            return lease_renewed
+        except RedisError:
+            logger.exception(
+                "Redis task lock renewal failed",
                 extra={"task_id": task_id, "agent_id": agent_id},
             )
             raise

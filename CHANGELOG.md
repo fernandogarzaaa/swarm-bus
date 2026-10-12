@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-13
+
+First tagged release.
+
 ### Added
+- `POST /v1/bus/renew` (owner-checked `PEXPIRE` via Lua) and `POST /v1/bus/release` (owner-checked delete) so long tasks keep their lease and finished tasks free it early.
 - uv.lock lockfile.
 - Dependabot config for uv and GitHub Actions (weekly).
 - .env.example listing the environment variables SwarmBus reads.

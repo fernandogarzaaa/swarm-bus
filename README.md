@@ -105,6 +105,15 @@ curl -X POST http://127.0.0.1:8000/v1/bus/claim \
 
 Only one agent can hold a task lease for a given `task_id` until the Redis TTL expires or the owning agent releases it.
 
+### Renew or Release a Lease
+
+Long-running work should renew before `LOCK_TTL_MS` elapses; finished work should release so other agents can claim the task immediately. Both are owner-checked atomically in Redis: a non-owner gets `lease_renewed` / `lease_released` = `false`.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/bus/renew   -H "Content-Type: application/json" -d '{"task_id": "task-123", "agent_id": "agent-alpha"}'
+curl -X POST http://127.0.0.1:8000/v1/bus/release -H "Content-Type: application/json" -d '{"task_id": "task-123", "agent_id": "agent-alpha"}'
+```
+
 ## Verification
 
 ```bash
