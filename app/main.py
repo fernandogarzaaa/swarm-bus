@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 from redis.exceptions import RedisError
 
@@ -29,6 +30,34 @@ app = FastAPI(
 broker = StreamBroker()
 locker = DistributedAgentLocker()
 interceptor = DeadlockLoopInterceptor()
+
+if not settings.SWARMBUS_API_KEY:
+    logger.warning(
+        "SWARMBUS_API_KEY is not set: /v1/bus/* routes are unauthenticated. "
+        "Bind to 127.0.0.1 or set SWARMBUS_API_KEY before exposing SwarmBus on a network."
+    )
+
+
+async def require_api_key(
+    x_api_key: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    """Enforce SWARMBUS_API_KEY (X-API-Key or Authorization: Bearer) when it is configured."""
+
+    expected = settings.SWARMBUS_API_KEY
+    if not expected:
+        return
+    presented = x_api_key
+    if presented is None and authorization and authorization.lower().startswith("bearer "):
+        presented = authorization[7:].strip()
+    if presented is None or not hmac.compare_digest(
+        presented.encode("utf-8"), expected.encode("utf-8")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"reason": "missing or invalid API key"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 class HealthResponse(BaseModel):
@@ -76,7 +105,11 @@ async def health_check() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
-@app.post("/v1/bus/broadcast", response_model=BroadcastResponse)
+@app.post(
+    "/v1/bus/broadcast",
+    response_model=BroadcastResponse,
+    dependencies=[Depends(require_api_key)],
+)
 async def broadcast_event(request: BroadcastRequest) -> BroadcastResponse:
     """Validate and broadcast an agent event vector into the Redis Streams fabric."""
 
@@ -117,7 +150,11 @@ async def broadcast_event(request: BroadcastRequest) -> BroadcastResponse:
     return BroadcastResponse(accepted=True, topic=request.topic, stream_id=stream_id)
 
 
-@app.post("/v1/bus/claim", response_model=ClaimResponse)
+@app.post(
+    "/v1/bus/claim",
+    response_model=ClaimResponse,
+    dependencies=[Depends(require_api_key)],
+)
 async def claim_task(request: ClaimRequest) -> ClaimResponse:
     """Attempt to acquire an atomic lease for a task."""
 
