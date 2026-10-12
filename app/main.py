@@ -89,6 +89,24 @@ class ClaimResponse(BaseModel):
     lock_ttl_ms: int
 
 
+class LeaseRequest(BaseModel):
+    task_id: str = Field(min_length=1)
+    agent_id: str = Field(min_length=1)
+
+
+class ReleaseResponse(BaseModel):
+    task_id: str
+    agent_id: str
+    lease_released: bool
+
+
+class RenewResponse(BaseModel):
+    task_id: str
+    agent_id: str
+    lease_renewed: bool
+    lock_ttl_ms: int
+
+
 @app.get("/healthz", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
     """Liveness check: confirms the app is up and that Redis is reachable."""
@@ -174,5 +192,48 @@ async def claim_task(request: ClaimRequest) -> ClaimResponse:
         task_id=request.task_id,
         agent_id=request.agent_id,
         lease_acquired=lease_acquired,
+        lock_ttl_ms=settings.LOCK_TTL_MS,
+    )
+
+
+@app.post(
+    "/v1/bus/release",
+    response_model=ReleaseResponse,
+    dependencies=[Depends(require_api_key)],
+)
+async def release_task(request: LeaseRequest) -> ReleaseResponse:
+    """Release a lease early. Only the owning agent can release; others get lease_released=false."""
+
+    try:
+        released = await locker.release_task_lock(request.task_id, request.agent_id)
+    except (RedisError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"lease_released": False, "reason": "task lock operation failed"},
+        ) from exc
+    return ReleaseResponse(
+        task_id=request.task_id, agent_id=request.agent_id, lease_released=released
+    )
+
+
+@app.post(
+    "/v1/bus/renew",
+    response_model=RenewResponse,
+    dependencies=[Depends(require_api_key)],
+)
+async def renew_task(request: LeaseRequest) -> RenewResponse:
+    """Extend a held lease by LOCK_TTL_MS so long-running tasks do not silently lose it."""
+
+    try:
+        renewed = await locker.renew_task_lock(request.task_id, request.agent_id)
+    except (RedisError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"lease_renewed": False, "reason": "task lock operation failed"},
+        ) from exc
+    return RenewResponse(
+        task_id=request.task_id,
+        agent_id=request.agent_id,
+        lease_renewed=renewed,
         lock_ttl_ms=settings.LOCK_TTL_MS,
     )
