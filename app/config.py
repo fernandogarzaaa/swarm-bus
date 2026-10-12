@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     MAX_LOOP_DEPTH: int = Field(default=4, ge=1)
     LOCK_TTL_MS: int = Field(default=10_000, ge=100)
     AGENT_BUS_ENV: str = Field(default="production")
+    MAX_HISTORY_LENGTH: int = Field(default=256, ge=2)
+    SWARMBUS_API_KEY: str | None = Field(default=None)
 
 
 try:
